@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<Configuration>Release</Configuration>
+		<DebugType>none</DebugType>
+		<PluginOutputDir>$(ProjectDir)..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\plugins\ClientPrefs-GoldKingZ\</PluginOutputDir>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\cs2-ClientPrefs-GoldKingZ.Shared\ClientPrefs-GoldKingZ.Shared.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="CounterStrikeSharp.API" Version="*" />
+		<PackageReference Include="Newtonsoft.Json" Version="*" />
+		<PackageReference Include="MySqlConnector" Version="*" />
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="*" />
+	</ItemGroup>
+
+	<Target Name="CopyPluginFiles" AfterTargets="Build">
+		<MakeDir Directories="$(PluginOutputDir)" />
+		<ItemGroup>
+			<PluginFiles Include="$(TargetDir)$(TargetName).dll" />
+			<PluginFiles Include="$(TargetDir)Newtonsoft.Json.dll" />
+			<PluginFiles Include="$(TargetDir)MySqlConnector.dll" />
+			<PluginFiles Include="$(TargetDir)Microsoft.Data.Sqlite.dll" />
+			<PluginFiles Include="$(TargetDir)SQLitePCLRaw.core.dll" />
+			<PluginFiles Include="$(TargetDir)SQLitePCLRaw.batteries_v2.dll" />
+			<PluginFiles Include="$(TargetDir)SQLitePCLRaw.provider.e_sqlite3.dll" />
+			<PluginFiles Include="$(ProjectDir)..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\shared\ClientPrefs-GoldKingZ.Shared\ClientPrefs-GoldKingZ.Shared.dll" />
+		</ItemGroup>
+		<Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
+	</Target>
+
+	<Target Name="CopyNativeSqlite" AfterTargets="Build">
+		<ItemGroup>
+			<NativeLinux Include="$(TargetDir)runtimes\linux-x64\native\libe_sqlite3.so" Condition="Exists('$(TargetDir)runtimes\linux-x64\native\libe_sqlite3.so')" />
+			<NativeWin Include="$(TargetDir)runtimes\win-x64\native\e_sqlite3.dll" Condition="Exists('$(TargetDir)runtimes\win-x64\native\e_sqlite3.dll')" />
+		</ItemGroup>
+		<Copy SourceFiles="@(NativeLinux)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
+		<Copy SourceFiles="@(NativeWin)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
+	</Target>
+</Project>
