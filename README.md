@@ -61,6 +61,8 @@ public sealed class ClientPrefs
  
 ### 2. Register in your plugin
 ```csharp
+using ClientPrefs_GoldKingZ.Shared;
+
 private IPrefsStore<ClientPrefs>? _prefs;
  
 public override void OnAllPluginsLoaded(bool hotReload)
