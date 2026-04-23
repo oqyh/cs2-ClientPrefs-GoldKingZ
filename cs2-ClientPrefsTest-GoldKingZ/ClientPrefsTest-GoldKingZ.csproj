@@ -14,16 +14,15 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="CounterStrikeSharp.API" Version="*" />
-	</ItemGroup>
-
-	<ItemGroup>
 		<Reference Include="cs2-ClientPrefs-GoldKingZ.Shared">
 			<HintPath>..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\shared\ClientPrefs-GoldKingZ.Shared\ClientPrefs-GoldKingZ.Shared.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 	</ItemGroup>
 
+	<ItemGroup>
+		<PackageReference Include="CounterStrikeSharp.API" Version="*" />
+	</ItemGroup>
 
 	<!-- Copy Shared Folder Api Dll into your project -->
 	<!-- <Target Name="CopySharedFolder" AfterTargets="Build">
