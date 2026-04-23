@@ -226,7 +226,7 @@ csgo/addons/counterstrikesharp/plugins/<YourPlugin>/cookies/cookies.db
 1. Open **DB Browser For SQLite**
 2. Click **`Open Database`** And Select The `cookies.db` File
 3. Switch To The **`Browse Data`** Tab
-4. Edit What Ever You Like After You Do Then Apply
+4. Edit What Ever You Like Then Apply
 5. Select  **`File`** Tab And Then Select `Close Database`
 6. `Save`
 
