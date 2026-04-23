@@ -2,7 +2,7 @@
 
 <a href="https://discord.com/invite/U7AuQhu"><img src="https://discord.com/api/guilds/651838917687115806/widget.png?style=banner2"></a>
 
-# [CS2-API] ClientPrefs-GoldKingZ (1.0.0)
+# [CS2-API] ClientPrefs-GoldKingZ (1.0.1)
 
 Shared player Preferences API Per-Plugin Isolation With [Cookies(SQLite) + MySQL]
 
@@ -196,7 +196,31 @@ plugins/
     └── cookies/
         └── cookies.db                                   ← Created automatically
 ```
- 
+
+---
+
+## 🗄️ Browsing & Editing the Database
+
+If you ever need to inspect or manually edit values in `cookies.db`, the easiest tool is **DB Browser for SQLite**
+
+🔗 **Download:** https://github.com/sqlitebrowser/sqlitebrowser/releases
+
+### 📂 Locate the database file
+
+Each consumer plugin has its own isolated database:
+```
+csgo/addons/counterstrikesharp/plugins/<YourPlugin>/cookies/cookies.db
+```
+
+### 🔍 How to browse And Edit
+
+1. Open **DB Browser For SQLite**
+2. Click **`Open Database`** And Select The `cookies.db` File
+3. Switch To The **`Browse Data`** Tab
+4. Edit What Ever You Like After You Do Then Apply
+5. Select  **`File`** Tab And Then Select `Close Database`
+6. `Save`
+
 ---
  
 ## 🧪 Example Plugin
@@ -209,6 +233,11 @@ See [cs2-ClientPrefsTest-GoldKingZ](https://github.com/oqyh/cs2-ClientPrefs-Gold
 
 <details>
 <summary><b>📋 View Version History</b> (Click to expand 🔽)</summary>
+
+### [1.0.1]
+- Fix Freeze Players On Unload Core
+- Fix SaveAsync Error: Cannot access a disposed object
+- Added Debug Message On SaveAsync On Sql And MySql
 
 ### [1.0.0]
 - Initial plugin release
