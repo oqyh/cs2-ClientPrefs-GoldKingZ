@@ -455,19 +455,58 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
 
     public void Unload()
     {
-        _debug("Unload — saving all + closing connections + clearing memory", false);
-        ForceSaveAndClear();
+        _debug("Unload — saving all + closing connections + clearing memory", true);
 
-        if (_cookies != null)
+        bool saveCookie = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
+        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql is { IsReady: true };
+
+        var dirty = new List<Envelope>();
+        foreach (var kv in _bySlot)
         {
-            try { _cookies.Dispose(); } catch { }
-            _debug("SQLite connection closed", false);
+            if (!IsDirty(kv.Value)) continue;
+            RefreshName(kv.Value, kv.Key);
+            dirty.Add(kv.Value);
         }
 
-        if (_mysql != null)
+        _bySlot.Clear();
+
+        if (dirty.Count > 0) _debug($"Unload — saving {dirty.Count} player(s)", true);
+        else _debug("Unload — no players to save", true);
+
+        var now = DateTime.Now;
+        foreach (var e in dirty) e.Date = now;
+
+        _ = Task.Run(async () =>
         {
-            try { MySqlConnector.MySqlConnection.ClearAllPools(); } catch { }
-            _debug("MySQL connection pool cleared", false);
-        }
+            if (dirty.Count > 0 && (saveCookie || saveMySql))
+            {
+                try
+                {
+                    var tasks = new List<Task>();
+                    foreach (var e in dirty)
+                    {
+                        if (saveCookie) tasks.Add(_cookies!.SaveAsync(e.SteamId, e.PlayerName, e.Date, e.Payload));
+                        if (saveMySql)  tasks.Add(_mysql!.SaveAsync  (e.SteamId, e.PlayerName, e.Date, e.Payload));
+                    }
+                    if (tasks.Count > 0) await Task.WhenAll(tasks);
+                }
+                catch (Exception ex)
+                {
+                    _debug($"Unload save error: {ex.Message}", true);
+                }
+            }
+
+            if (_cookies != null)
+            {
+                try { _cookies.Dispose(); } catch { }
+                _debug("SQLite connection closed", true);
+            }
+
+            if (_mysql != null)
+            {
+                try { MySqlConnector.MySqlConnection.ClearAllPools(); } catch { }
+                _debug("MySQL connection pool cleared", true);
+            }
+        });
     }
 }

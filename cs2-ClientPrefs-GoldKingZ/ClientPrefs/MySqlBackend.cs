@@ -207,6 +207,7 @@ internal sealed class MySqlBackend<T> where T : class, new()
                 cmd.Parameters.Add("@" + p.Name, DbType(p.PropertyType)).Value = p.GetValue(payload)!;
 
             await cmd.ExecuteNonQueryAsync();
+            _debug($"MySQL: Saved Player {playerName} ({steamId})", false);
             return true;
         }
         catch (Exception ex)

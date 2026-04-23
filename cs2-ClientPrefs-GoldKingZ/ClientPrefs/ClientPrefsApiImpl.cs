@@ -7,7 +7,6 @@ namespace ClientPrefs_GoldKingZ;
 internal sealed class ClientPrefsApiImpl : IClientPrefsApi
 {
     private readonly List<IStoreLifecycle> _stores = new();
-    private readonly List<Action> _disposers = new();
 
     internal IEnumerable<IStoreLifecycle> All => _stores;
 
@@ -35,7 +34,6 @@ internal sealed class ClientPrefsApiImpl : IClientPrefsApi
             var dbPath = Path.Combine(plugin.ModuleDirectory, "cookies", "cookies.db");
             cookies = new CookiesBackend<T>(dbPath, debug);
             cookies.Initialize();
-            _disposers.Add(cookies.Dispose);
         }
 
         MySqlBackend<T>? mysql = null;
@@ -47,6 +45,7 @@ internal sealed class ClientPrefsApiImpl : IClientPrefsApi
         }
 
         var store = new PrefsStore<T>(plugin, pluginName, options, cookies, mysql, debug, () => _stores);
+        _stores.RemoveAll(s => s.PluginName == pluginName);
         _stores.Add(store);
 
         return store;
@@ -70,11 +69,13 @@ internal sealed class ClientPrefsApiImpl : IClientPrefsApi
         }
     }
 
-    internal void DisposeAllBackends()
+    internal void UnloadAllStores()
     {
-        MainPlugin.DebugCore("DisposeAllBackends — Closing All Connections...");
-        foreach (var d in _disposers) { try { d(); } catch { } }
-        _disposers.Clear();
+        MainPlugin.DebugCore("UnloadAllStores — Saving + Closing All Instances...");
+        foreach (var store in _stores)
+        {
+            try { store.Unload(); } catch { }
+        }
         _stores.Clear();
     }
 

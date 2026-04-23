@@ -15,6 +15,9 @@ internal sealed class CookiesBackend<T> where T : class, new()
     private readonly Action<string, bool> _debug;
 
     private SqliteConnection? _conn;
+    private volatile bool _disposed;
+    private string _upsertSql = "";
+    private string _deleteSql = "";
 
     public CookiesBackend(string dbPath, Action<string, bool> debug)
     {
@@ -57,6 +60,7 @@ internal sealed class CookiesBackend<T> where T : class, new()
 
             EnsureTable();
             Migrate();
+            BuildCachedSql();
             LoadCache();
 
             _debug($"SQLite Ready — {_cache.Count} Player(s) Cached", false);
@@ -70,6 +74,8 @@ internal sealed class CookiesBackend<T> where T : class, new()
 
     public void Dispose()
     {
+        _disposed = true;
+
         if (_conn != null)
         {
             try
@@ -98,6 +104,8 @@ internal sealed class CookiesBackend<T> where T : class, new()
 
     public async Task SaveAsync(ulong steamId, string playerName, DateTime date, T payload)
     {
+        if (_disposed) return;
+
         _info.FillNullStrings(payload);
         playerName ??= "";
         _cache[steamId] = (playerName, date, payload);
@@ -105,22 +113,14 @@ internal sealed class CookiesBackend<T> where T : class, new()
         await _writeLock.WaitAsync();
         try
         {
+            if (_disposed || _conn == null) return;
+
             await Task.Run(() =>
             {
-                if (_conn == null) return;
-
-                var allCols = BuildColumnList();
-                var parms   = string.Join(", ", allCols.Select(c => "@" + c));
-                var cols    = string.Join(", ", allCols);
-                var update  = string.Join(", ", allCols
-                    .Where(c => c != PrefsTypeInfo.PkColumn)
-                    .Select(c => $"{c} = excluded.{c}"));
+                if (_disposed || _conn == null) return;
 
                 using var cmd = _conn.CreateCommand();
-                cmd.CommandText = $@"
-                    INSERT INTO {TableName} ({cols}) VALUES ({parms})
-                    ON CONFLICT({PrefsTypeInfo.PkColumn}) DO UPDATE SET {update}
-                ";
+                cmd.CommandText = _upsertSql;
 
                 cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.NameColumn, playerName);
                 cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.PkColumn, (long)steamId);
@@ -130,10 +130,12 @@ internal sealed class CookiesBackend<T> where T : class, new()
 
                 cmd.ExecuteNonQuery();
             });
+            _debug($"SQLite: Saved Player {playerName} ({steamId})", false);
         }
         catch (Exception ex)
         {
-            _debug($"SQLite SaveAsync Error: {ex.Message}", true);
+            if (!_disposed)
+                _debug($"SQLite SaveAsync Error: {ex.Message}", true);
         }
         finally { _writeLock.Release(); }
     }
@@ -142,15 +144,19 @@ internal sealed class CookiesBackend<T> where T : class, new()
     {
         _cache.TryRemove(steamId, out _);
 
+        if (_disposed) return;
+
         await _writeLock.WaitAsync();
         try
         {
+            if (_disposed || _conn == null) return;
+
             await Task.Run(() =>
             {
-                if (_conn == null) return;
+                if (_disposed || _conn == null) return;
 
                 using var cmd = _conn.CreateCommand();
-                cmd.CommandText = $"DELETE FROM {TableName} WHERE {PrefsTypeInfo.PkColumn} = @id";
+                cmd.CommandText = _deleteSql;
                 cmd.Parameters.AddWithValue("@id", (long)steamId);
                 cmd.ExecuteNonQuery();
             });
@@ -158,14 +164,15 @@ internal sealed class CookiesBackend<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _debug($"SQLite DeleteAsync Error: {ex.Message}", true);
+            if (!_disposed)
+                _debug($"SQLite DeleteAsync Error: {ex.Message}", true);
         }
         finally { _writeLock.Release(); }
     }
 
     public async Task RemoveOldAsync(int days)
     {
-        if (days < 1) return;
+        if (days < 1 || _disposed) return;
 
         var cutoff = DateTime.Now.AddDays(-days);
 
@@ -184,9 +191,11 @@ internal sealed class CookiesBackend<T> where T : class, new()
         await _writeLock.WaitAsync();
         try
         {
+            if (_disposed || _conn == null) return;
+
             await Task.Run(() =>
             {
-                if (_conn == null) return;
+                if (_disposed || _conn == null) return;
 
                 using var cmd = _conn.CreateCommand();
                 cmd.CommandText = $"DELETE FROM {TableName} WHERE {PrefsTypeInfo.DateColumn} < @cutoff";
@@ -196,7 +205,8 @@ internal sealed class CookiesBackend<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _debug($"SQLite RemoveOldAsync Error: {ex.Message}", true);
+            if (!_disposed)
+                _debug($"SQLite RemoveOldAsync Error: {ex.Message}", true);
         }
         finally { _writeLock.Release(); }
     }
@@ -342,6 +352,19 @@ internal sealed class CookiesBackend<T> where T : class, new()
         cmd.CommandText = sql;
         cmd.Transaction = tx;
         cmd.ExecuteNonQuery();
+    }
+
+    private void BuildCachedSql()
+    {
+        var allCols = BuildColumnList();
+        var parms   = string.Join(", ", allCols.Select(c => "@" + c));
+        var cols    = string.Join(", ", allCols);
+        var update  = string.Join(", ", allCols
+            .Where(c => c != PrefsTypeInfo.PkColumn)
+            .Select(c => $"{c} = excluded.{c}"));
+
+        _upsertSql = $"INSERT INTO {TableName} ({cols}) VALUES ({parms}) ON CONFLICT({PrefsTypeInfo.PkColumn}) DO UPDATE SET {update}";
+        _deleteSql = $"DELETE FROM {TableName} WHERE {PrefsTypeInfo.PkColumn} = @id";
     }
 
     private void LoadCache()

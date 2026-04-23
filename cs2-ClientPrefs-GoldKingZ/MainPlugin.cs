@@ -7,33 +7,23 @@ namespace ClientPrefs_GoldKingZ;
 public sealed class MainPlugin : BasePlugin
 {
     public override string ModuleName => "Shared player Preferences API Per-Plugin Isolation With [Cookies(SQLite) + MySQL]"; 
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleAuthor => "Gold KingZ";
     public override string ModuleDescription => "https://github.com/oqyh";
-
-    public static MainPlugin Instance { get; private set; } = null!;
-
     private readonly ClientPrefsApiImpl _api = new();
 
     public override void Load(bool hotReload)
     {
-        Instance = this;
         Capabilities.RegisterPluginCapability(ClientPrefsApi.Capability, () => _api);
 
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
         RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
-
-        if (hotReload)
-        {
-            _api.RefreshAllStores();
-        }
     }
 
     public override void Unload(bool hotReload)
     {
-        _api.ForceSaveAllStores();
-        _api.DisposeAllBackends();
+        _api.UnloadAllStores();
     }
 
     private HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
