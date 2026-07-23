@@ -53,7 +53,7 @@ public sealed class ClientPrefsHud
 public sealed class ClientPrefsTestPlugin : BasePlugin
 {
     public override string ModuleName    => "ClientPrefs Test Plugin";
-    public override string ModuleVersion => "1.0.1";
+    public override string ModuleVersion => "1.0.3";
     public override string ModuleAuthor => "Gold KingZ";
     public override string ModuleDescription => "https://github.com/oqyh";
 
