@@ -10,6 +10,7 @@
 		<Configuration>Release</Configuration>
 		<DebugType>none</DebugType>
 		<PluginOutputDir>$(ProjectDir)..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\plugins\ClientPrefs-GoldKingZ\</PluginOutputDir>
+		<NoWarn>$(NoWarn);NU1903</NoWarn>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -19,8 +20,8 @@
 	<ItemGroup>
 		<PackageReference Include="CounterStrikeSharp.API" Version="*" />
 		<PackageReference Include="MySqlConnector" Version="*" />
-		<PackageReference Include="Microsoft.Data.Sqlite" Version="*" />
-		<PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="*" />
+		<PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
+		<PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.8" />
 	</ItemGroup>
 
 	<Target Name="CopyPluginFiles" AfterTargets="Build">
