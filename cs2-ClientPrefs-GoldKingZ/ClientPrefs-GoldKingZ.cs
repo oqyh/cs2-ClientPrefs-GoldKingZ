@@ -7,7 +7,7 @@ namespace ClientPrefs_GoldKingZ;
 public sealed class MainPlugin : BasePlugin
 {
     public override string ModuleName => "Shared player Preferences API Per-Plugin Isolation With [Cookies(SQLite) + MySQL]";
-    public override string ModuleVersion => "1.0.2";
+    public override string ModuleVersion => "1.0.3";
     public override string ModuleAuthor => "Gold KingZ";
     public override string ModuleDescription => "https://github.com/oqyh";
 	public static MainPlugin Instance { get; set; } = new();

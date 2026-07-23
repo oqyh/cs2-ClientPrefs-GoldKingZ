@@ -26,12 +26,12 @@
 	<Target Name="CopyPluginFiles" AfterTargets="Build">
 		<MakeDir Directories="$(PluginOutputDir)" />
 		<ItemGroup>
-			<PluginFiles Include="$(TargetDir)$(TargetName).dll" />
-			<PluginFiles Include="$(TargetDir)MySqlConnector.dll" />
-			<PluginFiles Include="$(TargetDir)Microsoft.Data.Sqlite.dll" />
-			<PluginFiles Include="$(TargetDir)SQLitePCLRaw.core.dll" />
-			<PluginFiles Include="$(TargetDir)SQLitePCLRaw.batteries_v2.dll" />
-			<PluginFiles Include="$(TargetDir)SQLitePCLRaw.provider.e_sqlite3.dll" />
+			<PluginFiles Include="$(ProjectDir)bin\Release\$(TargetName).dll" />
+			<PluginFiles Include="$(ProjectDir)bin\Release\MySqlConnector.dll" />
+			<PluginFiles Include="$(ProjectDir)bin\Release\Microsoft.Data.Sqlite.dll" />
+			<PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.core.dll" />
+			<PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.batteries_v2.dll" />
+			<PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.provider.e_sqlite3.dll" />
 			<PluginFiles Include="$(ProjectDir)..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\shared\ClientPrefs-GoldKingZ.Shared\ClientPrefs-GoldKingZ.Shared.dll" />
 		</ItemGroup>
 		<Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
@@ -39,8 +39,8 @@
 
 	<Target Name="CopyNativeSqlite" AfterTargets="Build">
 		<ItemGroup>
-			<NativeLinux Include="$(TargetDir)runtimes\linux-x64\native\libe_sqlite3.so" Condition="Exists('$(TargetDir)runtimes\linux-x64\native\libe_sqlite3.so')" />
-			<NativeWin Include="$(TargetDir)runtimes\win-x64\native\e_sqlite3.dll" Condition="Exists('$(TargetDir)runtimes\win-x64\native\e_sqlite3.dll')" />
+			<NativeLinux Include="$(ProjectDir)bin\Release\runtimes\linux-x64\native\libe_sqlite3.so" Condition="Exists('$(ProjectDir)bin\Release\runtimes\linux-x64\native\libe_sqlite3.so')" />
+			<NativeWin Include="$(ProjectDir)bin\Release\runtimes\win-x64\native\e_sqlite3.dll" Condition="Exists('$(ProjectDir)bin\Release\runtimes\win-x64\native\e_sqlite3.dll')" />
 		</ItemGroup>
 		<Copy SourceFiles="@(NativeLinux)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
 		<Copy SourceFiles="@(NativeWin)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
