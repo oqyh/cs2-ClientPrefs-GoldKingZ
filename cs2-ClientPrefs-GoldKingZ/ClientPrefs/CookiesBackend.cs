@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Reflection;
 using Microsoft.Data.Sqlite;
 
@@ -6,22 +7,22 @@ namespace ClientPrefs_GoldKingZ;
 
 internal sealed class CookiesBackend<T> where T : class, new()
 {
-    private const string TableName = "PlayerCookies";
-
     private readonly PrefsTypeInfo _info = PrefsTypeInfo.Of<T>();
     private readonly string _dbPath;
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly string _tableName;
     private readonly ConcurrentDictionary<ulong, (string name, DateTime date, T payload)> _cache = new();
     private readonly Action<string, bool> _debug;
 
-    private SqliteConnection? _conn;
+    private CookiesDatabase? _db;
     private volatile bool _disposed;
     private string _upsertSql = "";
     private string _deleteSql = "";
+    private SqliteConnection Conn => _db!.Connection;
 
-    public CookiesBackend(string dbPath, Action<string, bool> debug)
+    public CookiesBackend(string dbPath, string tableName, Action<string, bool> debug)
     {
         _dbPath = dbPath;
+        _tableName = tableName;
         _debug = debug;
     }
 
@@ -29,115 +30,105 @@ internal sealed class CookiesBackend<T> where T : class, new()
     {
         try
         {
-            SQLitePCL.Batteries.Init();
-        }
-        catch (Exception ex)
-        {
-            _debug($"SQLitePCL.Batteries.Init() Failed: {ex.Message}", true);
-            throw;
-        }
+            _db = CookiesDatabase.Acquire(_dbPath, _debug);
 
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
-            _debug($"Opening SQLite: {_dbPath}", false);
-
-            _conn = new SqliteConnection($"Data Source={_dbPath}");
-            _conn.Open();
-
-            using (var pragma = _conn.CreateCommand())
+            _db.WriteLock.Wait();
+            try
             {
-                pragma.CommandText = @"
-                    PRAGMA journal_mode = WAL;
-                    PRAGMA synchronous  = NORMAL;
-                    PRAGMA busy_timeout = 5000;
-                    PRAGMA cache_size   = -8000;
-                    PRAGMA temp_store   = MEMORY;
-                    PRAGMA wal_autocheckpoint = 1;
-                ";
-                pragma.ExecuteNonQuery();
+                EnsureTable();
+                Migrate();
+                BuildCachedSql();
+                LoadCache();
+                _debug($"SQLite table '{_tableName}' Ready — {_cache.Count} Player(s) Cached", false);
             }
-
-            EnsureTable();
-            Migrate();
-            BuildCachedSql();
-            LoadCache();
-
-            _debug($"SQLite Ready — {_cache.Count} Player(s) Cached", false);
+            finally { _db.WriteLock.Release(); }
         }
         catch (Exception ex)
         {
-            _debug($"SQLite Initialize Failed: {ex.Message}", true);
+            _debug($"SQLite Initialize Failed ({_tableName}): {ex.Message}", true);
             throw;
         }
     }
 
     public void Dispose()
     {
+        if (_disposed) return;
         _disposed = true;
 
-        if (_conn != null)
-        {
-            try
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE)";
-                    cmd.ExecuteNonQuery();
-                }
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = "PRAGMA journal_mode = DELETE";
-                    cmd.ExecuteNonQuery();
-                }
-            }
-            catch { }
-
-            _conn.Close();
-            _conn.Dispose();
-            _conn = null;
-        }
+        var db = _db;
+        _db = null;
+        db?.Release(_debug);
     }
 
     public (string name, DateTime date, T payload)? GetCached(ulong steamId) =>
         _cache.TryGetValue(steamId, out var v) ? v : null;
 
-    public async Task SaveAsync(ulong steamId, string playerName, DateTime date, T payload)
+    public Task<bool> SaveAsync(ulong steamId, string playerName, DateTime date, T payload)
     {
-        if (_disposed) return;
+        return SaveManyAsync(new List<(ulong, string, DateTime, T)> { (steamId, playerName, date, payload) });
+    }
 
-        _info.FillNullStrings(payload);
-        playerName ??= "";
-        _cache[steamId] = (playerName, date, payload);
+    public async Task<bool> SaveManyAsync(List<(ulong steamId, string playerName, DateTime date, T payload)> rows)
+    {
+        if (rows.Count == 0) return true;
+        if (_disposed) return false;
 
-        await _writeLock.WaitAsync();
+        foreach (var row in rows)
+        {
+            _info.FillNullStrings(row.payload);
+            _cache[row.steamId] = (row.playerName ?? "", row.date, row.payload);
+        }
+
+        var db = _db;
+        if (db == null) return false;
+
+        await db.WriteLock.WaitAsync();
         try
         {
-            if (_disposed || _conn == null) return;
+            if (_disposed || _db == null) return false;
 
             await Task.Run(() =>
             {
-                if (_disposed || _conn == null) return;
+                if (_disposed || _db == null) return;
 
-                using var cmd = _conn.CreateCommand();
-                cmd.CommandText = _upsertSql;
+                using var tx = _db.Connection.BeginTransaction();
+                try
+                {
+                    foreach (var row in rows)
+                    {
+                        using var cmd = _db.Connection.CreateCommand();
+                        cmd.CommandText = _upsertSql;
+                        cmd.Transaction = tx;
 
-                cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.NameColumn, playerName);
-                cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.PkColumn, (long)steamId);
-                cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.DateColumn, date.ToString("yyyy-MM-dd HH:mm:ss"));
-                foreach (var p in _info.Props)
-                    cmd.Parameters.AddWithValue("@" + p.Name, ToSqlite(p.GetValue(payload), p.PropertyType));
+                        cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.NameColumn, row.playerName ?? "");
+                        cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.PkColumn, (long)row.steamId);
+                        cmd.Parameters.AddWithValue("@" + PrefsTypeInfo.DateColumn, row.date.ToString("yyyy-MM-dd HH:mm:ss"));
+                        foreach (var p in _info.Props)
+                            cmd.Parameters.AddWithValue("@" + p.Name, ToSqlite(p.GetValue(row.payload), p.PropertyType));
 
-                cmd.ExecuteNonQuery();
+                        cmd.ExecuteNonQuery();
+                    }
+                    tx.Commit();
+                }
+                catch
+                {
+                    try { tx.Rollback(); } catch { }
+                    throw;
+                }
             });
-            _debug($"SQLite: Saved Player {playerName} ({steamId})", false);
+
+            _debug(rows.Count == 1
+                ? $"SQLite: Saved Player {rows[0].playerName} ({rows[0].steamId})"
+                : $"SQLite: Saved {rows.Count} Player(s) In One Transaction", false);
+            return true;
         }
         catch (Exception ex)
         {
             if (!_disposed)
-                _debug($"SQLite SaveAsync Error: {ex.Message}", true);
+                _debug($"SQLite SaveManyAsync Error: {ex.Message}", true);
+            return false;
         }
-        finally { _writeLock.Release(); }
+        finally { db.WriteLock.Release(); }
     }
 
     public async Task DeleteAsync(ulong steamId)
@@ -146,16 +137,19 @@ internal sealed class CookiesBackend<T> where T : class, new()
 
         if (_disposed) return;
 
-        await _writeLock.WaitAsync();
+        var db = _db;
+        if (db == null) return;
+
+        await db.WriteLock.WaitAsync();
         try
         {
-            if (_disposed || _conn == null) return;
+            if (_disposed || _db == null) return;
 
             await Task.Run(() =>
             {
-                if (_disposed || _conn == null) return;
+                if (_disposed || _db == null) return;
 
-                using var cmd = _conn.CreateCommand();
+                using var cmd = _db.Connection.CreateCommand();
                 cmd.CommandText = _deleteSql;
                 cmd.Parameters.AddWithValue("@id", (long)steamId);
                 cmd.ExecuteNonQuery();
@@ -167,38 +161,42 @@ internal sealed class CookiesBackend<T> where T : class, new()
             if (!_disposed)
                 _debug($"SQLite DeleteAsync Error: {ex.Message}", true);
         }
-        finally { _writeLock.Release(); }
+        finally { db.WriteLock.Release(); }
     }
 
     public async Task RemoveOldAsync(int days)
     {
         if (days < 1 || _disposed) return;
-
+        
         var cutoff = DateTime.Now.AddDays(-days);
 
         var expired = _cache
             .Where(kv => kv.Value.date < cutoff)
-            .Select(kv => kv.Key)
+            .Select(kv => (steamId: kv.Key, name: kv.Value.name, date: kv.Value.date))
             .ToList();
 
-        foreach (var id in expired) _cache.TryRemove(id, out _);
-
-        if (expired.Count > 0)
-            _debug($"SQLite Cleanup: Removing {expired.Count} Inactive Player(s) Older Than {days} Day(s)", false);
+        foreach (var e in expired) _cache.TryRemove(e.steamId, out _);
 
         if (expired.Count == 0) return;
 
-        await _writeLock.WaitAsync();
+        _debug($"SQLite Cleanup: Removing {expired.Count} Inactive Player(s) Older Than {days} Day(s):", false);
+        foreach (var e in expired)
+            _debug($"SQLite Cleanup: Removed {e.name} ({e.steamId}) — Last Active {e.date:yyyy-MM-dd HH:mm:ss}", false);
+
+        var db = _db;
+        if (db == null) return;
+
+        await db.WriteLock.WaitAsync();
         try
         {
-            if (_disposed || _conn == null) return;
+            if (_disposed || _db == null) return;
 
             await Task.Run(() =>
             {
-                if (_disposed || _conn == null) return;
+                if (_disposed || _db == null) return;
 
-                using var cmd = _conn.CreateCommand();
-                cmd.CommandText = $"DELETE FROM {TableName} WHERE {PrefsTypeInfo.DateColumn} < @cutoff";
+                using var cmd = _db.Connection.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {_tableName} WHERE {PrefsTypeInfo.DateColumn} < @cutoff";
                 cmd.Parameters.AddWithValue("@cutoff", cutoff.ToString("yyyy-MM-dd HH:mm:ss"));
                 cmd.ExecuteNonQuery();
             });
@@ -208,7 +206,7 @@ internal sealed class CookiesBackend<T> where T : class, new()
             if (!_disposed)
                 _debug($"SQLite RemoveOldAsync Error: {ex.Message}", true);
         }
-        finally { _writeLock.Release(); }
+        finally { db.WriteLock.Release(); }
     }
 
     private void EnsureTable()
@@ -221,17 +219,17 @@ internal sealed class CookiesBackend<T> where T : class, new()
         };
         cols.AddRange(_info.Props.Select(p => $"{p.Name} {SqlType(p)}"));
 
-        using var cmd = _conn!.CreateCommand();
-        cmd.CommandText = $"CREATE TABLE IF NOT EXISTS {TableName} ({string.Join(", ", cols)})";
+        using var cmd = Conn.CreateCommand();
+        cmd.CommandText = $"CREATE TABLE IF NOT EXISTS {_tableName} ({string.Join(", ", cols)})";
         cmd.ExecuteNonQuery();
     }
 
     private void Migrate()
     {
         var existing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        using (var cmd = _conn!.CreateCommand())
+        using (var cmd = Conn.CreateCommand())
         {
-            cmd.CommandText = $"PRAGMA table_info({TableName})";
+            cmd.CommandText = $"PRAGMA table_info({_tableName})";
             using var r = cmd.ExecuteReader();
             while (r.Read())
                 existing[r.GetString(1)] = r.GetString(2).ToUpper();
@@ -293,21 +291,21 @@ internal sealed class CookiesBackend<T> where T : class, new()
 
     private void DropColumn(string col)
     {
-        using var cmd = _conn!.CreateCommand();
-        cmd.CommandText = $"ALTER TABLE {TableName} DROP COLUMN {col}";
+        using var cmd = Conn.CreateCommand();
+        cmd.CommandText = $"ALTER TABLE {_tableName} DROP COLUMN {col}";
         cmd.ExecuteNonQuery();
     }
 
     private void AddColumn(string col, string typeDef)
     {
-        using var cmd = _conn!.CreateCommand();
-        cmd.CommandText = $"ALTER TABLE {TableName} ADD COLUMN {col} {typeDef}";
+        using var cmd = Conn.CreateCommand();
+        cmd.CommandText = $"ALTER TABLE {_tableName} ADD COLUMN {col} {typeDef}";
         cmd.ExecuteNonQuery();
     }
 
     private void RebuildTable()
     {
-        _debug("SQLite Migration: Rebuilding Table For Type Change...", false);
+        _debug($"SQLite Migration: Rebuilding Table '{_tableName}' For Type Change...", false);
 
         var newCols = new List<string>
         {
@@ -318,9 +316,9 @@ internal sealed class CookiesBackend<T> where T : class, new()
         newCols.AddRange(_info.Props.Select(p => $"{p.Name} {SqlType(p)}"));
 
         var existingCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var cmd = _conn!.CreateCommand())
+        using (var cmd = Conn.CreateCommand())
         {
-            cmd.CommandText = $"PRAGMA table_info({TableName})";
+            cmd.CommandText = $"PRAGMA table_info({_tableName})";
             using var r = cmd.ExecuteReader();
             while (r.Read()) existingCols.Add(r.GetString(1));
         }
@@ -329,15 +327,15 @@ internal sealed class CookiesBackend<T> where T : class, new()
         keepCols.AddRange(_info.Props.Select(p => p.Name).Where(n => existingCols.Contains(n)));
         var colList = string.Join(", ", keepCols);
 
-        using var tx = _conn!.BeginTransaction();
+        using var tx = Conn.BeginTransaction();
         try
         {
-            Exec($"ALTER TABLE {TableName} RENAME TO {TableName}_old", tx);
-            Exec($"CREATE TABLE {TableName} ({string.Join(", ", newCols)})", tx);
-            Exec($"INSERT INTO {TableName} ({colList}) SELECT {colList} FROM {TableName}_old", tx);
-            Exec($"DROP TABLE {TableName}_old", tx);
+            Exec($"ALTER TABLE {_tableName} RENAME TO {_tableName}_old", tx);
+            Exec($"CREATE TABLE {_tableName} ({string.Join(", ", newCols)})", tx);
+            Exec($"INSERT INTO {_tableName} ({colList}) SELECT {colList} FROM {_tableName}_old", tx);
+            Exec($"DROP TABLE {_tableName}_old", tx);
             tx.Commit();
-            _debug("SQLite Migration: Table Rebuilt Successfully", false);
+            _debug($"SQLite Migration: Table '{_tableName}' Rebuilt Successfully", false);
         }
         catch (Exception ex)
         {
@@ -348,7 +346,7 @@ internal sealed class CookiesBackend<T> where T : class, new()
 
     private void Exec(string sql, SqliteTransaction tx)
     {
-        using var cmd = _conn!.CreateCommand();
+        using var cmd = Conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Transaction = tx;
         cmd.ExecuteNonQuery();
@@ -363,14 +361,14 @@ internal sealed class CookiesBackend<T> where T : class, new()
             .Where(c => c != PrefsTypeInfo.PkColumn)
             .Select(c => $"{c} = excluded.{c}"));
 
-        _upsertSql = $"INSERT INTO {TableName} ({cols}) VALUES ({parms}) ON CONFLICT({PrefsTypeInfo.PkColumn}) DO UPDATE SET {update}";
-        _deleteSql = $"DELETE FROM {TableName} WHERE {PrefsTypeInfo.PkColumn} = @id";
+        _upsertSql = $"INSERT INTO {_tableName} ({cols}) VALUES ({parms}) ON CONFLICT({PrefsTypeInfo.PkColumn}) DO UPDATE SET {update}";
+        _deleteSql = $"DELETE FROM {_tableName} WHERE {PrefsTypeInfo.PkColumn} = @id";
     }
 
     private void LoadCache()
     {
-        using var cmd = _conn!.CreateCommand();
-        cmd.CommandText = $"SELECT * FROM {TableName}";
+        using var cmd = Conn.CreateCommand();
+        cmd.CommandText = $"SELECT * FROM {_tableName}";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -403,6 +401,11 @@ internal sealed class CookiesBackend<T> where T : class, new()
         return list;
     }
 
+    internal static double FloatToStorage(float f)
+    {
+        return double.Parse(f.ToString("R", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+    }
+
     private static string SqlType(PropertyInfo p)
     {
         if (p.PropertyType == typeof(float))    return "REAL NOT NULL DEFAULT 0";
@@ -431,7 +434,7 @@ internal sealed class CookiesBackend<T> where T : class, new()
         if (value == null) return DBNull.Value;
         if (type == typeof(bool))     return (bool)value ? 1L : 0L;
         if (type == typeof(ulong))    return (long)(ulong)value;
-        if (type == typeof(float))    return (double)(float)value;
+        if (type == typeof(float))    return FloatToStorage((float)value);
         if (type == typeof(DateTime)) return ((DateTime)value).ToString("yyyy-MM-dd HH:mm:ss");
         return value;
     }

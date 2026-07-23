@@ -5,6 +5,7 @@ namespace ClientPrefs_GoldKingZ;
 internal interface IStoreLifecycle
 {
     string PluginName { get; }
+    string StoreKey   { get; }
     Task LoadPlayerAsync(CCSPlayerController? player);
     Task OnPlayerDisconnectAsync(int slot);
     Task OnMapEndAsync();

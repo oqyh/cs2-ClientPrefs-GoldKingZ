@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
-		<TargetFramework>net8.0</TargetFramework>
+		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -20,6 +20,7 @@
 		<PackageReference Include="CounterStrikeSharp.API" Version="*" />
 		<PackageReference Include="MySqlConnector" Version="*" />
 		<PackageReference Include="Microsoft.Data.Sqlite" Version="*" />
+		<PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="*" />
 	</ItemGroup>
 
 	<Target Name="CopyPluginFiles" AfterTargets="Build">
@@ -43,5 +44,12 @@
 		</ItemGroup>
 		<Copy SourceFiles="@(NativeLinux)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
 		<Copy SourceFiles="@(NativeWin)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
+	</Target>
+
+	<Target Name="CopyLangFolder" AfterTargets="Build">
+		<ItemGroup>
+			<LangFiles Include="$(ProjectDir)lang\**\*.*" />
+		</ItemGroup>
+		<Copy SourceFiles="@(LangFiles)" DestinationFiles="@(LangFiles->'$(PluginOutputDir)lang\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="false" />
 	</Target>
 </Project>

@@ -10,63 +10,71 @@ internal sealed class MySqlBackend<T> where T : class, new()
     private readonly string _tableName;
     private readonly ClientPrefsOptions _opts;
     private readonly Action<string, bool> _debug;
-    private readonly object _lock = new();
-    private bool _isMigrating;
-    public bool IsReady { get; private set; }
+    private readonly object _ensureLock = new();
+    private readonly HashSet<string> _ensuredServers = new();
+    private MySqlManager? _manager;
+    private volatile bool _disposed;
 
     public MySqlBackend(string tableName, ClientPrefsOptions opts, Action<string, bool> debug)
     {
         _tableName = tableName;
         _opts = opts;
         _debug = debug;
+        _manager = MySqlManager.Acquire(opts);
     }
 
-    public async Task<MySqlConnection?> GetConnectionAsync()
+    public void Dispose()
     {
-        var servers = _opts.PrefsAPI_MySqlConfig.EffectiveServers;
-        if (servers.Count == 0) return null;
+        if (_disposed) return;
+        _disposed = true;
 
-        for (int attempt = 0; attempt < _opts.PrefsAPI_MySqlRetryAttempts; attempt++)
-        {
-            if (attempt > 0) await Task.Delay(TimeSpan.FromSeconds(_opts.PrefsAPI_MySqlRetryDelay));
+        var mgr = _manager;
+        _manager = null;
+        mgr?.Release();
+    }
 
-            foreach (var s in servers)
-            {
-                try
-                {
-                    var conn = new MySqlConnection(new MySqlConnectionStringBuilder
-                    {
-                        Server   = s.Server,
-                        Port     = (uint)s.Port,
-                        Database = s.Database,
-                        UserID   = s.Username,
-                        Password = s.Password,
-                        ConnectionTimeout = (uint)_opts.PrefsAPI_MySqlConnectionTimeout,
-                        Pooling = true, MinimumPoolSize = 0, MaximumPoolSize = 100,
-                    }.ConnectionString);
+    private Task<List<(string serverKey, MySqlConnection conn)>> GetAllConnectionsAsync()
+    {
+        var mgr = _manager;
+        if (_disposed || mgr == null)
+            return Task.FromResult(new List<(string, MySqlConnection)>());
 
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_opts.PrefsAPI_MySqlConnectionTimeout));
-                    await conn.OpenAsync(cts.Token);
-                    return conn;
-                }
-                catch (Exception ex)
-                {
-                    _debug($"MySQL connection failed ({s.Server}:{s.Port}): {ex.Message}", true);
-                }
-            }
-        }
-        _debug($"MySQL all connection attempts exhausted ({_opts.PrefsAPI_MySqlRetryAttempts} attempts)", true);
-        return null;
+        return mgr.GetAllConnectionsAsync(
+            _opts.PrefsAPI_MySqlConnectionTimeout,
+            _opts.PrefsAPI_MySqlRetryAttempts,
+            _opts.PrefsAPI_MySqlRetryDelay,
+            _debug);
     }
 
     public async Task<bool> EnsureTableAsync()
     {
-        lock (_lock) { if (_isMigrating) return false; _isMigrating = true; }
+        var conns = await GetAllConnectionsAsync();
+        if (conns.Count == 0) return false;
+
+        bool anyOk = false;
+        foreach (var (key, conn) in conns)
+        {
+            try
+            {
+                if (await EnsureTableOnAsync(key, conn)) anyOk = true;
+            }
+            finally
+            {
+                try { await conn.DisposeAsync(); } catch { }
+            }
+        }
+        return anyOk;
+    }
+
+    private async Task<bool> EnsureTableOnAsync(string serverKey, MySqlConnection conn)
+    {
+        lock (_ensureLock)
+        {
+            if (_ensuredServers.Contains(serverKey)) return true;
+        }
+
         try
         {
-            await using var conn = await GetConnectionAsync();
-            if (conn == null) return false;
-
             await using var check = new MySqlCommand(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = @t", conn);
             check.Parameters.AddWithValue("@t", _tableName);
@@ -85,24 +93,27 @@ internal sealed class MySqlBackend<T> where T : class, new()
                 await using var cmd = new MySqlCommand(
                     $"CREATE TABLE {_tableName} ({string.Join(", ", cols)})", conn);
                 await cmd.ExecuteNonQueryAsync();
-                _debug($"MySQL table '{_tableName}' created", false);
+                _debug($"MySQL [{serverKey}]: table '{_tableName}' created", false);
             }
             else
             {
-                await MigrateAsync(conn);
+                await MigrateAsync(serverKey, conn);
             }
-            IsReady = true;
+
+            lock (_ensureLock)
+            {
+                _ensuredServers.Add(serverKey);
+            }
             return true;
         }
         catch (Exception ex)
         {
-            _debug($"MySQL EnsureTableAsync error: {ex.Message}", true);
+            _debug($"MySQL [{serverKey}] EnsureTable error: {ex.Message}", true);
             return false;
         }
-        finally { lock (_lock) { _isMigrating = false; } }
     }
 
-    private async Task MigrateAsync(MySqlConnection conn)
+    private async Task MigrateAsync(string serverKey, MySqlConnection conn)
     {
         var existing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         await using (var cmd = new MySqlCommand(
@@ -128,14 +139,14 @@ internal sealed class MySqlBackend<T> where T : class, new()
 
             if (!propByName.TryGetValue(col, out var prop))
             {
-                _debug($"MySQL migration: dropping removed column '{col}'", false);
+                _debug($"MySQL [{serverKey}] migration: dropping removed column '{col}'", false);
                 await using var cmd = new MySqlCommand($"ALTER TABLE {_tableName} DROP COLUMN {col}", conn);
                 await cmd.ExecuteNonQueryAsync();
                 existing.Remove(col);
             }
             else if (existing[col] != DataType(prop))
             {
-                _debug($"MySQL migration: type changed for '{col}' ({existing[col]} → {DataType(prop)}), modifying", false);
+                _debug($"MySQL [{serverKey}] migration: type changed for '{col}' ({existing[col]} -> {DataType(prop)}), modifying", false);
                 await using var cmd = new MySqlCommand(
                     $"ALTER TABLE {_tableName} MODIFY COLUMN {col} {SqlType(prop)}", conn);
                 await cmd.ExecuteNonQueryAsync();
@@ -145,7 +156,7 @@ internal sealed class MySqlBackend<T> where T : class, new()
 
         if (!existing.ContainsKey(PrefsTypeInfo.NameColumn))
         {
-            _debug($"MySQL migration: adding missing column '{PrefsTypeInfo.NameColumn}'", false);
+            _debug($"MySQL [{serverKey}] migration: adding missing column '{PrefsTypeInfo.NameColumn}'", false);
             await using var cmd = new MySqlCommand(
                 $"ALTER TABLE {_tableName} ADD COLUMN {PrefsTypeInfo.NameColumn} VARCHAR(255) NOT NULL DEFAULT '' FIRST", conn);
             await cmd.ExecuteNonQueryAsync();
@@ -153,7 +164,7 @@ internal sealed class MySqlBackend<T> where T : class, new()
 
         if (!existing.ContainsKey(PrefsTypeInfo.DateColumn))
         {
-            _debug($"MySQL migration: adding missing column '{PrefsTypeInfo.DateColumn}'", false);
+            _debug($"MySQL [{serverKey}] migration: adding missing column '{PrefsTypeInfo.DateColumn}'", false);
             await using var cmd = new MySqlCommand(
                 $"ALTER TABLE {_tableName} ADD COLUMN {PrefsTypeInfo.DateColumn} DATETIME NOT NULL DEFAULT NOW() AFTER {PrefsTypeInfo.PkColumn}", conn);
             await cmd.ExecuteNonQueryAsync();
@@ -164,7 +175,7 @@ internal sealed class MySqlBackend<T> where T : class, new()
         {
             if (!existing.ContainsKey(p.Name))
             {
-                _debug($"MySQL migration: adding new column '{p.Name}'", false);
+                _debug($"MySQL [{serverKey}] migration: adding new column '{p.Name}'", false);
                 await using var cmd = new MySqlCommand(
                     $"ALTER TABLE {_tableName} ADD COLUMN {p.Name} {SqlType(p)} AFTER {prev}", conn);
                 await cmd.ExecuteNonQueryAsync();
@@ -178,6 +189,83 @@ internal sealed class MySqlBackend<T> where T : class, new()
         _info.FillNullStrings(payload);
         playerName ??= "";
 
+        var conns = await GetAllConnectionsAsync();
+        if (conns.Count == 0) return false;
+
+        bool anyOk = false;
+        foreach (var (key, conn) in conns)
+        {
+            try
+            {
+                if (!await EnsureTableOnAsync(key, conn)) continue;
+
+                await using var cmd = BuildUpsertCommand(conn, steamId, playerName, date, payload);
+                await cmd.ExecuteNonQueryAsync();
+                _debug($"MySQL [{key}]: Saved Player {playerName} ({steamId})", false);
+                anyOk = true;
+            }
+            catch (Exception ex)
+            {
+                _debug($"MySQL [{key}] SaveAsync error: {ex.Message}", true);
+            }
+            finally
+            {
+                try { await conn.DisposeAsync(); } catch { }
+            }
+        }
+        return anyOk;
+    }
+
+    public async Task<bool> SaveManyAsync(List<(ulong steamId, string playerName, DateTime date, T payload)> rows)
+    {
+        if (rows.Count == 0) return true;
+
+        foreach (var row in rows)
+            _info.FillNullStrings(row.payload);
+
+        var conns = await GetAllConnectionsAsync();
+        if (conns.Count == 0) return false;
+
+        bool anyOk = false;
+        foreach (var (key, conn) in conns)
+        {
+            try
+            {
+                if (!await EnsureTableOnAsync(key, conn)) continue;
+
+                await using var tx = await conn.BeginTransactionAsync();
+                try
+                {
+                    foreach (var row in rows)
+                    {
+                        await using var cmd = BuildUpsertCommand(conn, row.steamId, row.playerName ?? "", row.date, row.payload);
+                        cmd.Transaction = tx;
+                        await cmd.ExecuteNonQueryAsync();
+                    }
+                    await tx.CommitAsync();
+                    _debug($"MySQL [{key}]: Saved {rows.Count} Player(s) In One Transaction", false);
+                    anyOk = true;
+                }
+                catch
+                {
+                    try { await tx.RollbackAsync(); } catch { }
+                    throw;
+                }
+            }
+            catch (Exception ex)
+            {
+                _debug($"MySQL [{key}] SaveManyAsync error: {ex.Message}", true);
+            }
+            finally
+            {
+                try { await conn.DisposeAsync(); } catch { }
+            }
+        }
+        return anyOk;
+    }
+
+    private MySqlCommand BuildUpsertCommand(MySqlConnection conn, ulong steamId, string playerName, DateTime date, T payload)
+    {
         var allCols = new List<string>
         {
             PrefsTypeInfo.NameColumn,
@@ -192,111 +280,152 @@ internal sealed class MySqlBackend<T> where T : class, new()
             .Where(c => c != PrefsTypeInfo.PkColumn)
             .Select(c => $"{c} = VALUES({c})"));
 
-        try
+        var cmd = new MySqlCommand(
+            $"INSERT INTO {_tableName} ({cols}) VALUES ({parms}) ON DUPLICATE KEY UPDATE {update}", conn);
+
+        cmd.Parameters.Add("@" + PrefsTypeInfo.NameColumn, MySqlDbType.VarChar, 255).Value = playerName;
+        cmd.Parameters.Add("@" + PrefsTypeInfo.PkColumn,   MySqlDbType.UInt64).Value       = steamId;
+        cmd.Parameters.Add("@" + PrefsTypeInfo.DateColumn, MySqlDbType.DateTime).Value     = date;
+        foreach (var p in _info.Props)
         {
-            await using var conn = await GetConnectionAsync();
-            if (conn == null) return false;
-
-            await using var cmd = new MySqlCommand(
-                $"INSERT INTO {_tableName} ({cols}) VALUES ({parms}) ON DUPLICATE KEY UPDATE {update}", conn);
-
-            cmd.Parameters.Add("@" + PrefsTypeInfo.NameColumn, MySqlDbType.VarChar, 255).Value = playerName;
-            cmd.Parameters.Add("@" + PrefsTypeInfo.PkColumn,   MySqlDbType.UInt64).Value       = steamId;
-            cmd.Parameters.Add("@" + PrefsTypeInfo.DateColumn, MySqlDbType.DateTime).Value     = date;
-            foreach (var p in _info.Props)
-                cmd.Parameters.Add("@" + p.Name, DbType(p.PropertyType)).Value = p.GetValue(payload)!;
-
-            await cmd.ExecuteNonQueryAsync();
-            _debug($"MySQL: Saved Player {playerName} ({steamId})", false);
-            return true;
+            var v = p.GetValue(payload)!;
+            if (p.PropertyType == typeof(float)) v = CookiesBackend<T>.FloatToStorage((float)v);
+            cmd.Parameters.Add("@" + p.Name, DbType(p.PropertyType)).Value = v;
         }
-        catch (Exception ex)
-        {
-            _debug($"MySQL SaveAsync error: {ex.Message}", true);
-            return false;
-        }
+
+        return cmd;
     }
 
     public async Task<(DateTime date, T payload)?> LoadAsync(ulong steamId)
     {
-        try
+        var conns = await GetAllConnectionsAsync();
+        if (conns.Count == 0) return null;
+
+        (DateTime date, T payload)? best = null;
+        string bestKey = "";
+
+        foreach (var (key, conn) in conns)
         {
-            await using var conn = await GetConnectionAsync();
-            if (conn == null) return null;
-
-            await using var cmd = new MySqlCommand(
-                $"SELECT * FROM {_tableName} WHERE {PrefsTypeInfo.PkColumn} = @id", conn);
-            cmd.Parameters.Add("@id", MySqlDbType.UInt64).Value = steamId;
-
-            await using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync()) return null;
-
-            var date = reader.GetDateTime(PrefsTypeInfo.DateColumn);
-
-            var obj = new T();
-            foreach (var p in _info.Props)
+            try
             {
-                try { p.SetValue(obj, ReadColumn(reader, p)); } catch { }
+                if (!await EnsureTableOnAsync(key, conn)) continue;
+
+                await using var cmd = new MySqlCommand(
+                    $"SELECT * FROM {_tableName} WHERE {PrefsTypeInfo.PkColumn} = @id", conn);
+                cmd.Parameters.Add("@id", MySqlDbType.UInt64).Value = steamId;
+
+                await using var reader = await cmd.ExecuteReaderAsync();
+                if (!await reader.ReadAsync()) continue;
+
+                var date = reader.GetDateTime(PrefsTypeInfo.DateColumn);
+
+                if (best == null || date > best.Value.date)
+                {
+                    var obj = new T();
+                    foreach (var p in _info.Props)
+                    {
+                        try { p.SetValue(obj, ReadColumn(reader, p)); } catch { }
+                    }
+                    best = (date, obj);
+                    bestKey = key;
+                }
             }
-            return (date, obj);
+            catch (Exception ex)
+            {
+                _debug($"MySQL [{key}] LoadAsync error: {ex.Message}", true);
+            }
+            finally
+            {
+                try { await conn.DisposeAsync(); } catch { }
+            }
         }
-        catch (Exception ex)
-        {
-            _debug($"MySQL LoadAsync error: {ex.Message}", true);
-            return null;
-        }
+
+        if (best != null && conns.Count > 1)
+            _debug($"MySQL: newest row for {steamId} came from [{bestKey}] ({best.Value.date:yyyy-MM-dd HH:mm:ss})", false);
+
+        return best;
     }
 
     public async Task<bool> DeleteAsync(ulong steamId)
     {
-        try
-        {
-            await using var conn = await GetConnectionAsync();
-            if (conn == null) return false;
+        var conns = await GetAllConnectionsAsync();
+        if (conns.Count == 0) return false;
 
-            await using var cmd = new MySqlCommand(
-                $"DELETE FROM {_tableName} WHERE {PrefsTypeInfo.PkColumn} = @id", conn);
-            cmd.Parameters.Add("@id", MySqlDbType.UInt64).Value = steamId;
-            await cmd.ExecuteNonQueryAsync();
-            _debug($"MySQL: deleted player {steamId}", false);
-            return true;
-        }
-        catch (Exception ex)
+        bool anyOk = false;
+        foreach (var (key, conn) in conns)
         {
-            _debug($"MySQL DeleteAsync error: {ex.Message}", true);
-            return false;
+            try
+            {
+                await using var cmd = new MySqlCommand(
+                    $"DELETE FROM {_tableName} WHERE {PrefsTypeInfo.PkColumn} = @id", conn);
+                cmd.Parameters.Add("@id", MySqlDbType.UInt64).Value = steamId;
+                await cmd.ExecuteNonQueryAsync();
+                _debug($"MySQL [{key}]: deleted player {steamId}", false);
+                anyOk = true;
+            }
+            catch (Exception ex)
+            {
+                _debug($"MySQL [{key}] DeleteAsync error: {ex.Message}", true);
+            }
+            finally
+            {
+                try { await conn.DisposeAsync(); } catch { }
+            }
         }
+        return anyOk;
     }
 
     public async Task<bool> DeleteOldAsync(int days)
     {
         if (days < 1) return false;
 
-        try
+        var conns = await GetAllConnectionsAsync();
+        if (conns.Count == 0) return false;
+
+        bool anyOk = false;
+        foreach (var (key, conn) in conns)
         {
-            await using var conn = await GetConnectionAsync();
-            if (conn == null) return false;
+            try
+            {
+                var expired = new List<(ulong steamId, string name, DateTime date)>();
+                await using (var select = new MySqlCommand(
+                    $"SELECT {PrefsTypeInfo.PkColumn}, {PrefsTypeInfo.NameColumn}, {PrefsTypeInfo.DateColumn} FROM {_tableName} WHERE {PrefsTypeInfo.DateColumn} < NOW() - INTERVAL @Days DAY", conn))
+                {
+                    select.Parameters.Add("@Days", MySqlDbType.Int32).Value = days;
+                    await using var r = await select.ExecuteReaderAsync();
+                    while (await r.ReadAsync())
+                        expired.Add((r.GetUInt64(0), r.GetString(1), r.GetDateTime(2)));
+                }
 
-            await using var cmd = new MySqlCommand(
-                $"DELETE FROM {_tableName} WHERE {PrefsTypeInfo.DateColumn} < NOW() - INTERVAL @Days DAY", conn);
-            cmd.Parameters.Add("@Days", MySqlDbType.Int32).Value = days;
-            var rows = await cmd.ExecuteNonQueryAsync();
+                if (expired.Count > 0)
+                {
+                    _debug($"MySQL [{key}] Cleanup: Removing {expired.Count} Inactive Player(s) Older Than {days} Day(s):", false);
+                    foreach (var e in expired)
+                        _debug($"MySQL [{key}] Cleanup: Removed {e.name} ({e.steamId}) — Last Active {e.date:yyyy-MM-dd HH:mm:ss}", false);
 
-            if (rows > 0)
-                _debug($"MySQL cleanup: removed {rows} inactive player(s) older than {days} day(s)", false);
+                    await using var cmd = new MySqlCommand(
+                        $"DELETE FROM {_tableName} WHERE {PrefsTypeInfo.DateColumn} < NOW() - INTERVAL @Days DAY", conn);
+                    cmd.Parameters.Add("@Days", MySqlDbType.Int32).Value = days;
+                    await cmd.ExecuteNonQueryAsync();
+                }
 
-            return true;
+                anyOk = true;
+            }
+            catch (Exception ex)
+            {
+                _debug($"MySQL [{key}] DeleteOldAsync error: {ex.Message}", true);
+            }
+            finally
+            {
+                try { await conn.DisposeAsync(); } catch { }
+            }
         }
-        catch (Exception ex)
-        {
-            _debug($"MySQL DeleteOldAsync error: {ex.Message}", true);
-            return false;
-        }
+        return anyOk;
     }
 
     private static string SqlType(PropertyInfo p)
     {
-        if (p.PropertyType == typeof(float))    return "FLOAT NOT NULL DEFAULT 0";
+        if (p.PropertyType == typeof(float))    return "DOUBLE NOT NULL DEFAULT 0";
         if (p.PropertyType == typeof(double))   return "DOUBLE NOT NULL DEFAULT 0";
         if (p.PropertyType == typeof(int))      return "INT NOT NULL DEFAULT 0";
         if (p.PropertyType == typeof(long))     return "BIGINT NOT NULL DEFAULT 0";
@@ -308,7 +437,7 @@ internal sealed class MySqlBackend<T> where T : class, new()
 
     private static string DataType(PropertyInfo p)
     {
-        if (p.PropertyType == typeof(float))    return "float";
+        if (p.PropertyType == typeof(float))    return "double";
         if (p.PropertyType == typeof(double))   return "double";
         if (p.PropertyType == typeof(int))      return "int";
         if (p.PropertyType == typeof(long))     return "bigint";
@@ -323,7 +452,7 @@ internal sealed class MySqlBackend<T> where T : class, new()
         if (t == typeof(ulong))    return MySqlDbType.UInt64;
         if (t == typeof(long))     return MySqlDbType.Int64;
         if (t == typeof(int))      return MySqlDbType.Int32;
-        if (t == typeof(float))    return MySqlDbType.Float;
+        if (t == typeof(float))    return MySqlDbType.Double;
         if (t == typeof(double))   return MySqlDbType.Double;
         if (t == typeof(bool))     return MySqlDbType.Byte;
         if (t == typeof(DateTime)) return MySqlDbType.DateTime;
@@ -335,7 +464,7 @@ internal sealed class MySqlBackend<T> where T : class, new()
         if (p.PropertyType == typeof(ulong))    return r.GetUInt64(p.Name);
         if (p.PropertyType == typeof(long))     return r.GetInt64(p.Name);
         if (p.PropertyType == typeof(int))      return r.GetInt32(p.Name);
-        if (p.PropertyType == typeof(float))    return r.GetFloat(p.Name);
+        if (p.PropertyType == typeof(float))    return (float)r.GetDouble(p.Name);
         if (p.PropertyType == typeof(double))   return r.GetDouble(p.Name);
         if (p.PropertyType == typeof(bool))     return r.GetBoolean(p.Name);
         if (p.PropertyType == typeof(DateTime)) return r.GetDateTime(p.Name);

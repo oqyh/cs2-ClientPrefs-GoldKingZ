@@ -1,0 +1,4 @@
+{
+	"PrintToChatToPlayer.ClientPrefs.Loading": "{green}[ClientPrefs] {grey}Your Preferences Are Still Loading, Please Wait A Moment...",
+	"PrintToChatToPlayer.ClientPrefs.Loaded": "{green}[ClientPrefs] {grey}Your Preferences Have Been {lime}Loaded!"
+}

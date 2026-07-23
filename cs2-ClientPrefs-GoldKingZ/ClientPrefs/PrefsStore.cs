@@ -15,6 +15,12 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         public T        Baseline = null!;
         public bool     LoadedFromStorage;
         public bool     HasBeenMutated;
+
+        public readonly object MergeGate = new();
+        public bool     CookiesApplied;
+        public DateTime CookiesDate = DateTime.MinValue;
+
+        public volatile bool StorageReady;
     }
 
     private readonly PrefsTypeInfo _info = PrefsTypeInfo.Of<T>();
@@ -27,14 +33,18 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
     private readonly ConcurrentDictionary<int, Envelope> _bySlot = new();
 
     public string PluginName { get; }
+    public string StoreKey   { get; }
+    public string TableName  { get; }
     public BasePlugin Plugin { get; }
 
-    public PrefsStore(BasePlugin plugin, string pluginName, ClientPrefsOptions opts,
-                      CookiesBackend<T>? cookies, MySqlBackend<T>? mysql,
+    public PrefsStore(BasePlugin plugin, string pluginName, string storeKey, string tableName,
+                      ClientPrefsOptions opts, CookiesBackend<T>? cookies, MySqlBackend<T>? mysql,
                       Action<string, bool> debug, Func<IEnumerable<IStoreLifecycle>> allStores)
     {
         Plugin = plugin;
         PluginName = pluginName;
+        StoreKey = storeKey;
+        TableName = tableName;
         _opts = opts;
         _cookies = cookies;
         _mysql = mysql;
@@ -42,29 +52,63 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         _allStores = allStores;
     }
 
-    public async Task LoadPlayerAsync(CCSPlayerController? player)
+    private string DumpValues(T payload)
     {
-        if (player == null || !player.IsValid || player.IsBot || player.IsHLTV) return;
+        return string.Join(", ", _info.Props.Select(p => $"{p.Name}={p.GetValue(payload)}"));
+    }
+
+    private static CCSPlayerController? FindPlayerBySlot(int slot)
+    {
+        try
+        {
+            var p = CounterStrikeSharp.API.Utilities.GetPlayerFromSlot(slot);
+            return p != null && p.IsValid && !p.IsBot && !p.IsHLTV ? p : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public Task LoadPlayerAsync(CCSPlayerController? player)
+    {
+        if (player == null || !player.IsValid || player.IsBot || player.IsHLTV) return Task.CompletedTask;
 
         var slot = player.Slot;
         var steamId = player.SteamID;
         var playerName = player.PlayerName ?? "";
 
+        _debug($"LoadPlayerAsync start — {playerName} slot {slot} steamId {steamId}", false);
+
+        foreach (var kv in _bySlot)
+        {
+            if (kv.Key != slot && kv.Value.SteamId == steamId)
+            {
+                if (_bySlot.TryRemove(kv.Key, out var moved))
+                {
+                    _bySlot[slot] = moved;
+                    _debug($"moved envelope from slot {kv.Key} to slot {slot}, values: [{DumpValues(moved.Payload)}]", false);
+                }
+                break;
+            }
+        }
+
         if (_bySlot.TryGetValue(slot, out var existing))
         {
             if (existing.SteamId != steamId)
             {
-                _debug($"Slot {slot} reused by different player ({existing.SteamId} → {steamId}), reloading fresh", false);
+                _debug($"slot {slot} had different player ({existing.SteamId}), removing", false);
                 _bySlot.TryRemove(slot, out _);
             }
             else if (!_opts.PrefsAPI_ReloadOnReconnect)
             {
-                _debug($"Player {playerName} (slot {slot}) already in memory, skipping load", false);
-                return;
+                existing.PlayerName = playerName;
+                _debug($"{playerName} already in memory, KEEPING EXISTING values: [{DumpValues(existing.Payload)}] (dirty={existing.HasBeenMutated || existing.LoadedFromStorage})", false);
+                return Task.CompletedTask;
             }
             else
             {
-                _debug($"Player {playerName} (slot {slot}) reconnected, ReloadOnReconnect=true, reloading", false);
+                _debug($"{playerName} reconnected, ReloadOnReconnect=true, discarding old values: [{DumpValues(existing.Payload)}]", false);
                 _bySlot.TryRemove(slot, out _);
             }
         }
@@ -72,38 +116,119 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         var env = new Envelope
         {
             SteamId = steamId,
-            PlayerName = playerName ?? "",
+            PlayerName = playerName,
             Date = DateTime.Now,
             Payload = new T()
         };
 
-        if (_opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null)
+        _debug($"new envelope with defaults: [{DumpValues(env.Payload)}]", false);
+
+        bool cookiesActive = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
+        bool mysqlActive   = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql   != null;
+
+        if (cookiesActive)
         {
-            var cached = _cookies.GetCached(steamId);
+            var cached = _cookies!.GetCached(steamId);
             if (cached.HasValue)
             {
                 CopyInto(cached.Value.payload, env.Payload);
                 env.Date = cached.Value.date;
+                env.CookiesDate = cached.Value.date;
+                env.CookiesApplied = true;
                 env.LoadedFromStorage = true;
-                _debug($"Player {playerName} loaded from cookies.db", false);
+                _debug($"cookies applied (date {cached.Value.date:yyyy-MM-dd HH:mm:ss}): [{DumpValues(env.Payload)}]", false);
+            }
+            else
+            {
+                _debug($"no cookies row for {steamId}", false);
             }
         }
 
-        if (_opts.PrefsAPI_MySqlEnable != PrefsAPI_SaveMode.Disabled && _mysql is { IsReady: true })
+        if (!cookiesActive && !mysqlActive)
         {
-            var row = await _mysql.LoadAsync(steamId);
-            if (row.HasValue)
-            {
-                CopyInto(row.Value.payload, env.Payload);
-                env.Date = row.Value.date;
-                env.LoadedFromStorage = true;
-                _debug($"Player {playerName} loaded from MySQL (overrides cookies)", false);
-            }
+            env.StorageReady = true;
+            _debug($"{playerName} storage READY (cookies disabled + mysql disabled — memory only)", false);
+        }
+        else if (cookiesActive && !mysqlActive)
+        {
+            env.StorageReady = true;
+            _debug($"{playerName} storage READY (cookies applied, mysql disabled — nothing to wait for)", false);
+        }
+        else
+        {
+            LoadNotifier.RegisterPending(slot, steamId);
+            _debug($"{playerName} storage NOT ready yet — waiting for MySQL stage (cookies {(cookiesActive ? "applied" : "disabled")})", false);
         }
 
         env.Baseline = Clone(env.Payload);
-        _bySlot.TryAdd(slot, env);
+        _bySlot[slot] = env;
         _debug($"Player {playerName} (slot {slot}, {steamId}) ready", false);
+
+        if (mysqlActive)
+        {
+            _ = Task.Run(() => ApplyMySqlStage(slot, env, steamId, playerName));
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ApplyMySqlStage(int slot, Envelope env, ulong steamId, string playerName)
+    {
+        try
+        {
+            var row = await _mysql!.LoadAsync(steamId);
+            if (!row.HasValue)
+            {
+                _debug($"MySQL stage: no row / no connection for {playerName}, keeping current values", false);
+                return;
+            }
+
+            _debug($"row loaded for {playerName} (date {row.Value.date:yyyy-MM-dd HH:mm:ss}): [{DumpValues(row.Value.payload)}]", false);
+
+            lock (env.MergeGate)
+            {
+                if (!_bySlot.TryGetValue(slot, out var current))
+                {
+                    _debug($"slot {slot} has NO envelope anymore — discarding row", false);
+                    return;
+                }
+                if (!ReferenceEquals(current, env))
+                {
+                    _debug($"slot {slot} envelope was REPLACED — discarding row", false);
+                    return;
+                }
+
+                if (env.HasBeenMutated || _info.DiffersFromBaseline(env.Payload, env.Baseline))
+                {
+                    _debug($"{playerName} already changed values, keeping current: [{DumpValues(env.Payload)}]", false);
+                    return;
+                }
+
+                if (env.CookiesApplied && row.Value.date < env.CookiesDate)
+                {
+                    _debug($"row older than cookies ({row.Value.date:yyyy-MM-dd HH:mm:ss} < {env.CookiesDate:yyyy-MM-dd HH:mm:ss}) — keeping cookies values: [{DumpValues(env.Payload)}]", false);
+                    return;
+                }
+
+                _debug($"values BEFORE merge: [{DumpValues(env.Payload)}]", false);
+                CopyInto(row.Value.payload, env.Payload);
+                env.Date = row.Value.date;
+                env.LoadedFromStorage = true;
+                env.Baseline = Clone(env.Payload);
+                _debug($"values AFTER merge: [{DumpValues(env.Payload)}]", false);
+                _debug($"MySQL stage: {playerName} values applied (overrides sql/defaults)", false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _debug($"MySQL stage error: {ex.Message}", true);
+        }
+        finally
+        {
+            env.StorageReady = true;
+            LoadNotifier.MarkReady(slot, steamId);
+            _debug($"{playerName} storage READY — TryGetValue unlocked", false);
+        }
     }
 
     private T Clone(T src) => (T)_info.Clone(src);
@@ -119,12 +244,24 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         return false;
     }
 
+    private static void MarkClean(Envelope env, T savedSnapshot)
+    {
+        env.Baseline = savedSnapshot;
+        env.LoadedFromStorage = false;
+        env.HasBeenMutated = false;
+    }
+
     private void RefreshName(Envelope env, int slot)
     {
-        var live = CounterStrikeSharp.API.Utilities.GetPlayers()
-            .FirstOrDefault(p => p.Slot == slot && p.IsValid && !p.IsBot && !p.IsHLTV);
-        if (live != null && !string.IsNullOrEmpty(live.PlayerName))
-            env.PlayerName = live.PlayerName;
+        try
+        {
+            var live = FindPlayerBySlot(slot);
+            if (live != null && !string.IsNullOrEmpty(live.PlayerName))
+                env.PlayerName = live.PlayerName;
+        }
+        catch
+        {
+        }
     }
 
     public async Task OnPlayerDisconnectAsync(int slot)
@@ -132,17 +269,27 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         if (!_bySlot.TryGetValue(slot, out var env)) return;
 
         bool saveCookie = _opts.PrefsAPI_CookiesEnable == PrefsAPI_SaveMode.OnPlayerDisconnect && _cookies != null;
-        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   == PrefsAPI_SaveMode.OnPlayerDisconnect && _mysql is { IsReady: true };
+        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   == PrefsAPI_SaveMode.OnPlayerDisconnect && _mysql != null;
 
         if ((saveCookie || saveMySql) && IsDirty(env))
         {
             env.Date = DateTime.Now;
             RefreshName(env, slot);
+            var snapshot = Clone(env.Payload);
             _debug($"Player {env.PlayerName} (slot {slot}) disconnected — saving (mode 1)", false);
             try
             {
-                if (saveCookie) await _cookies!.SaveAsync(env.SteamId, env.PlayerName, env.Date, env.Payload);
-                if (saveMySql)  await _mysql!.SaveAsync  (env.SteamId, env.PlayerName, env.Date, env.Payload);
+                bool cookieOk = !saveCookie || await _cookies!.SaveAsync(env.SteamId, env.PlayerName, env.Date, snapshot);
+                bool mysqlOk  = !saveMySql  || await _mysql!.SaveAsync  (env.SteamId, env.PlayerName, env.Date, snapshot);
+
+                if (cookieOk && mysqlOk)
+                {
+                    MarkClean(env, snapshot);
+                }
+                else
+                {
+                    _debug($"Disconnect save failed — keeping {env.PlayerName} values in memory, will retry on next save", true);
+                }
             }
             catch (Exception ex)
             {
@@ -157,67 +304,77 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
 
     public Task OnMapEndAsync()
     {
-        bool saveCookie  = _opts.PrefsAPI_CookiesEnable == PrefsAPI_SaveMode.OnMapEnd && _cookies != null;
-        bool saveMySql   = _opts.PrefsAPI_MySqlEnable   == PrefsAPI_SaveMode.OnMapEnd && _mysql is { IsReady: true };
-        bool cleanCookie = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
-        bool cleanMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql is { IsReady: true };
-
-        List<Envelope>? playersToSave = null;
-        if (saveCookie || saveMySql)
+        try
         {
-            playersToSave = new List<Envelope>();
+            bool saveCookie  = _opts.PrefsAPI_CookiesEnable == PrefsAPI_SaveMode.OnMapEnd && _cookies != null;
+            bool saveMySql   = _opts.PrefsAPI_MySqlEnable   == PrefsAPI_SaveMode.OnMapEnd && _mysql != null;
+            bool cleanCookie = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
+            bool cleanMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql != null;
+
+            var now = DateTime.Now;
+            var toSave = new List<(Envelope env, T snapshot)>();
+
             foreach (var kv in _bySlot)
             {
-                if (!IsDirty(kv.Value)) continue;
-                RefreshName(kv.Value, kv.Key);
-                playersToSave.Add(kv.Value);
-            }
-        }
+                var env = kv.Value;
 
-        if (playersToSave?.Count is null or 0 && !cleanCookie && !cleanMySql)
-        {
-            _bySlot.Clear();
-            _debug("Map ended — nothing to save, memory cleared", false);
-            return Task.CompletedTask;
-        }
-
-        int totalPlayers = _bySlot.Count;
-        int dirtyCount = playersToSave?.Count ?? 0;
-        _bySlot.Clear();
-
-        _debug($"Map ended — {dirtyCount} changed / {totalPlayers} total, saving (mode 2)", false);
-
-        if (playersToSave != null)
-        {
-            var now = DateTime.Now;
-            foreach (var e in playersToSave) e.Date = now;
-        }
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                var tasks = new List<Task>();
-
-                if (playersToSave?.Count > 0)
+                if ((saveCookie || saveMySql) && IsDirty(env))
                 {
-                    foreach (var e in playersToSave)
-                    {
-                        if (saveCookie) tasks.Add(_cookies!.SaveAsync(e.SteamId, e.PlayerName, e.Date, e.Payload));
-                        if (saveMySql)  tasks.Add(_mysql!.SaveAsync  (e.SteamId, e.PlayerName, e.Date, e.Payload));
-                    }
+                    env.Date = now;
+                    toSave.Add((env, Clone(env.Payload)));
                 }
-
-                if (cleanCookie) tasks.Add(_cookies!.RemoveOldAsync(_opts.PrefsAPI_CookiesAutoRemoveInactivePlayersOlderThanDays));
-                if (cleanMySql)  tasks.Add(_mysql!.DeleteOldAsync   (_opts.PrefsAPI_MySqlAutoRemoveInactivePlayersOlderThanDays));
-
-                if (tasks.Count > 0) await Task.WhenAll(tasks);
+                else
+                {
+                    _bySlot.TryRemove(kv.Key, out _);
+                }
             }
-            catch (Exception ex)
+
+            _debug($"Map ended — {toSave.Count} changed, saving (mode 2), values kept in memory until save is confirmed", false);
+
+            if (toSave.Count == 0 && !cleanCookie && !cleanMySql)
+                return Task.CompletedTask;
+
+            _ = Task.Run(async () =>
             {
-                _debug($"OnMapEnd save error: {ex.Message}", true);
-            }
-        });
+                try
+                {
+                    bool cookieAllOk = true;
+                    if (saveCookie && toSave.Count > 0)
+                    {
+                        var rows = toSave.Select(x => (x.env.SteamId, x.env.PlayerName, now, x.snapshot)).ToList();
+                        cookieAllOk = await _cookies!.SaveManyAsync(rows);
+                    }
+
+                    bool mysqlAllOk = true;
+                    if (saveMySql && toSave.Count > 0)
+                    {
+                        var rows = toSave.Select(x => (x.env.SteamId, x.env.PlayerName, now, x.snapshot)).ToList();
+                        mysqlAllOk = await _mysql!.SaveManyAsync(rows);
+                    }
+
+                    if ((!saveCookie || cookieAllOk) && (!saveMySql || mysqlAllOk))
+                    {
+                        foreach (var (env, snapshot) in toSave)
+                            MarkClean(env, snapshot);
+                    }
+                    else
+                    {
+                        _debug($"Map end save failed — {toSave.Count} player(s) kept in memory with their values, will retry on next save", true);
+                    }
+
+                    if (cleanCookie) await _cookies!.RemoveOldAsync(_opts.PrefsAPI_CookiesAutoRemoveInactivePlayersOlderThanDays);
+                    if (cleanMySql)  await _mysql!.DeleteOldAsync  (_opts.PrefsAPI_MySqlAutoRemoveInactivePlayersOlderThanDays);
+                }
+                catch (Exception ex)
+                {
+                    _debug($"OnMapEnd save error: {ex.Message}", true);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _debug($"OnMapEnd error: {ex.Message}", true);
+        }
 
         return Task.CompletedTask;
     }
@@ -238,18 +395,46 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
             data = null!;
             return false;
         }
+
+        if (_bySlot.TryGetValue(player.Slot, out var e) && !e.StorageReady)
+        {
+            _debug($"TryGetValue slot {player.Slot} — storage not ready yet, telling player to wait", false);
+            LoadNotifier.ShowWaitMessage(player);
+            data = null!;
+            return false;
+        }
+
         return TryGetValue(player.Slot, out data);
     }
 
     public bool TryGetValue(int slot, out T data)
     {
-        if (_bySlot.TryGetValue(slot, out var e)) { data = e.Payload; return true; }
+        if (_bySlot.TryGetValue(slot, out var e))
+        {
+            if (!e.StorageReady)
+            {
+                _debug($"TryGetValue slot {slot} — storage not ready yet, telling player to wait", false);
+                LoadNotifier.ShowWaitMessage(FindPlayerBySlot(slot));
+                data = null!;
+                return false;
+            }
+            data = e.Payload;
+            return true;
+        }
         data = null!; return false;
     }
 
     public bool TryGetValue(CCSPlayerController player, Action<T> action)
     {
         if (player == null || !player.IsValid || player.IsBot || player.IsHLTV) return false;
+
+        if (_bySlot.TryGetValue(player.Slot, out var e) && !e.StorageReady)
+        {
+            _debug($"TryGetValue slot {player.Slot} — storage not ready yet, telling player to wait", false);
+            LoadNotifier.ShowWaitMessage(player);
+            return false;
+        }
+
         return TryGetValue(player.Slot, action);
     }
 
@@ -257,6 +442,12 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
     {
         if (_bySlot.TryGetValue(slot, out var e))
         {
+            if (!e.StorageReady)
+            {
+                _debug($"TryGetValue slot {slot} — storage not ready yet, telling player to wait", false);
+                LoadNotifier.ShowWaitMessage(FindPlayerBySlot(slot));
+                return false;
+            }
             action(e.Payload);
             if (!e.HasBeenMutated && _info.DiffersFromBaseline(e.Payload, e.Baseline))
                 e.HasBeenMutated = true;
@@ -286,29 +477,34 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         _debug($"ForceSave slot {slot}", false);
 
         bool saveCookie = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
-        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql is { IsReady: true };
+        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql != null;
 
         var steamId = e.SteamId;
         var name = e.PlayerName;
         var date = e.Date;
-        var payload = e.Payload;
+        var snapshot = Clone(e.Payload);
 
         _ = Task.Run(async () =>
         {
             try
             {
-                if (saveCookie) await _cookies!.SaveAsync(steamId, name, date, payload);
-                if (saveMySql)  await _mysql!.SaveAsync  (steamId, name, date, payload);
+                bool cookieOk = !saveCookie || await _cookies!.SaveAsync(steamId, name, date, snapshot);
+                bool mysqlOk  = !saveMySql  || await _mysql!.SaveAsync  (steamId, name, date, snapshot);
+
+                if (cookieOk && mysqlOk)
+                {
+                    MarkClean(e, snapshot);
+                }
+                else
+                {
+                    _debug($"ForceSave slot {slot} failed — keeping values in memory, will retry on next save", true);
+                }
             }
             catch (Exception ex)
             {
                 _debug($"ForceSave error: {ex.Message}", true);
             }
         });
-
-        e.Baseline = Clone(e.Payload);
-        e.LoadedFromStorage = false;
-        e.HasBeenMutated = false;
     }
 
     public void ForceSavePlayer_To_All_Instances(CCSPlayerController player)
@@ -346,7 +542,7 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         _debug($"DropPlayer slot {slot} (steamId {steamId}) — wiping from memory + storage", false);
 
         bool hasCookie = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
-        bool hasMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql is { IsReady: true };
+        bool hasMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql != null;
 
         if (hasCookie || hasMySql)
         {
@@ -374,6 +570,7 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
                 Payload = new T()
             };
             fresh.Baseline = Clone(fresh.Payload);
+            fresh.StorageReady = true;
             _bySlot.TryAdd(slot, fresh);
             _debug($"DropPlayer slot {slot} — reloaded with defaults", false);
         }
@@ -397,14 +594,15 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
     public void ForceSaveAndClear()
     {
         bool saveCookie = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
-        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql is { IsReady: true };
+        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql != null;
 
-        var dirty = new List<Envelope>();
+        var now = DateTime.Now;
+        var dirty = new List<(ulong steamId, string name, DateTime date, T snapshot)>();
         foreach (var kv in _bySlot)
         {
             if (!IsDirty(kv.Value)) continue;
-            RefreshName(kv.Value, kv.Key);
-            dirty.Add(kv.Value);
+            kv.Value.Date = now;
+            dirty.Add((kv.Value.SteamId, kv.Value.PlayerName, now, Clone(kv.Value.Payload)));
         }
 
         _bySlot.Clear();
@@ -412,20 +610,13 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         if (dirty.Count > 0 && (saveCookie || saveMySql))
         {
             _debug($"ForceSaveAndClear — saving {dirty.Count} player(s)", false);
-            var now = DateTime.Now;
-            foreach (var e in dirty) e.Date = now;
 
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    var tasks = new List<Task>();
-                    foreach (var e in dirty)
-                    {
-                        if (saveCookie) tasks.Add(_cookies!.SaveAsync(e.SteamId, e.PlayerName, e.Date, e.Payload));
-                        if (saveMySql)  tasks.Add(_mysql!.SaveAsync  (e.SteamId, e.PlayerName, e.Date, e.Payload));
-                    }
-                    if (tasks.Count > 0) await Task.WhenAll(tasks);
+                    if (saveCookie) await _cookies!.SaveManyAsync(dirty);
+                    if (saveMySql)  await _mysql!.SaveManyAsync(dirty);
                 }
                 catch (Exception ex)
                 {
@@ -444,12 +635,19 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         _debug("Refresh — saving + reloading all players", false);
         ForceSaveAndClear();
 
-        foreach (var p in CounterStrikeSharp.API.Utilities.GetPlayers())
+        try
         {
-            if (p == null || !p.IsValid) continue;
-            if (p.IsBot || p.IsHLTV) continue;
+            foreach (var p in CounterStrikeSharp.API.Utilities.GetPlayers())
+            {
+                if (p == null || !p.IsValid) continue;
+                if (p.IsBot || p.IsHLTV) continue;
 
-            _ = LoadPlayerAsync(p);
+                _ = LoadPlayerAsync(p);
+            }
+        }
+        catch (Exception ex)
+        {
+            _debug($"Refresh reload error: {ex.Message}", true);
         }
     }
 
@@ -458,14 +656,15 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         _debug("Unload — saving all + closing connections + clearing memory", true);
 
         bool saveCookie = _opts.PrefsAPI_CookiesEnable != PrefsAPI_SaveMode.Disabled && _cookies != null;
-        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql is { IsReady: true };
+        bool saveMySql  = _opts.PrefsAPI_MySqlEnable   != PrefsAPI_SaveMode.Disabled && _mysql != null;
 
-        var dirty = new List<Envelope>();
+        var now = DateTime.Now;
+        var dirty = new List<(ulong steamId, string name, DateTime date, T snapshot)>();
         foreach (var kv in _bySlot)
         {
             if (!IsDirty(kv.Value)) continue;
-            RefreshName(kv.Value, kv.Key);
-            dirty.Add(kv.Value);
+            kv.Value.Date = now;
+            dirty.Add((kv.Value.SteamId, kv.Value.PlayerName, now, Clone(kv.Value.Payload)));
         }
 
         _bySlot.Clear();
@@ -473,22 +672,14 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
         if (dirty.Count > 0) _debug($"Unload — saving {dirty.Count} player(s)", true);
         else _debug("Unload — no players to save", true);
 
-        var now = DateTime.Now;
-        foreach (var e in dirty) e.Date = now;
-
         _ = Task.Run(async () =>
         {
             if (dirty.Count > 0 && (saveCookie || saveMySql))
             {
                 try
                 {
-                    var tasks = new List<Task>();
-                    foreach (var e in dirty)
-                    {
-                        if (saveCookie) tasks.Add(_cookies!.SaveAsync(e.SteamId, e.PlayerName, e.Date, e.Payload));
-                        if (saveMySql)  tasks.Add(_mysql!.SaveAsync  (e.SteamId, e.PlayerName, e.Date, e.Payload));
-                    }
-                    if (tasks.Count > 0) await Task.WhenAll(tasks);
+                    if (saveCookie) await _cookies!.SaveManyAsync(dirty);
+                    if (saveMySql)  await _mysql!.SaveManyAsync(dirty);
                 }
                 catch (Exception ex)
                 {
@@ -504,8 +695,8 @@ internal sealed class PrefsStore<T> : IPrefsStore<T>, IStoreLifecycle where T : 
 
             if (_mysql != null)
             {
-                try { MySqlConnector.MySqlConnection.ClearAllPools(); } catch { }
-                _debug("MySQL connection pool cleared", true);
+                try { _mysql.Dispose(); } catch { }
+                _debug("MySQL manager released", true);
             }
         });
     }
