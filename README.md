@@ -301,7 +301,8 @@ See [cs2-ClientPrefsTest-GoldKingZ](https://github.com/oqyh/cs2-ClientPrefs-Gold
 <summary>📋 View Version History (Click to expand 🔽)</summary>
 
 ### [1.0.3]
-- Fixed a build configuration
+- Fixed A Build Configuration
+- Downgraded SQLite To Fix Linux Server Crash (`GLIBC_2.33` Error) On Older OS.
 
 ### [1.0.2]
 - Upgraded to .NET 10
