@@ -11,7 +11,7 @@
 
 ---
 
-# [CS2-API] ClientPrefs-GoldKingZ (1.0.2)
+# [CS2-API] ClientPrefs-GoldKingZ (1.0.3)
 
 Shared player Preferences API Per-Plugin Isolation With [Cookies(SQLite) + MySQL]
 
@@ -42,11 +42,14 @@ Shared player Preferences API Per-Plugin Isolation With [Cookies(SQLite) + MySQL
 
 ### For Developers
 
-1. Reference `ClientPrefs-GoldKingZ.Shared.dll` from the `shared` folder in your `.csproj`:
+1. Download the latest `ClientPrefs-GoldKingZ.x.x.x.zip` release.
+2. Open the `.zip` file, find the `shared` folder, and look for `ClientPrefs-GoldKingZ.Shared.dll`.
+3. Drag and drop that `.dll` file directly into your own project's root folder.
+4. Reference it inside your `.csproj` file like this:
 
 ```xml
-<Reference Include="cs2-ClientPrefs-GoldKingZ.Shared">
-    <HintPath>path\to\ClientPrefs-GoldKingZ.Shared.dll</HintPath>
+<Reference Include="ClientPrefs-GoldKingZ.Shared">
+    <HintPath>ClientPrefs-GoldKingZ.Shared.dll</HintPath>
     <Private>false</Private>
 </Reference>
 ```
@@ -296,6 +299,9 @@ See [cs2-ClientPrefsTest-GoldKingZ](https://github.com/oqyh/cs2-ClientPrefs-Gold
 
 <details>
 <summary>📋 View Version History (Click to expand 🔽)</summary>
+
+### [1.0.3]
+- Fixed a build configuration
 
 ### [1.0.2]
 - Upgraded to .NET 10
