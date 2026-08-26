@@ -331,7 +331,7 @@ csgo/addons/counterstrikesharp/plugins/ClientPrefs-GoldKingZ/<YourPlugin>/cookie
  
 ## 🧪 Example Plugin
  
-See [cs2-ClientPrefsTest-GoldKingZ](https://github.com/oqyh/cs2-ClientPrefs-GoldKingZ/tree/main/cs2-ClientPrefsTest-GoldKingZ) for a full working example covering every API method.
+See [ClientPrefsTest-GoldKingZ.cs](https://github.com/oqyh/cs2-ClientPrefs-GoldKingZ/blob/main/cs2-ClientPrefsTest-GoldKingZ/ClientPrefsTest-GoldKingZ.cs) for a full working example covering every API method.
  
 ---
 
