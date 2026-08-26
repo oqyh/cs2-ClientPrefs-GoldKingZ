@@ -10,9 +10,22 @@
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 		<Configuration>Release</Configuration>
 		<DebugType>none</DebugType>
+
+		<PackageId>ClientPrefs-GoldKingZ.Shared</PackageId>
+		<Version>1.0.4</Version>
+		<Authors>Gold KingZ</Authors>
+		<Description>Shared API for cs2-ClientPrefs-GoldKingZ — player preferences (SQLite cookies + MySQL) for CounterStrikeSharp plugins.</Description>
+		<PackageProjectUrl>https://github.com/oqyh/cs2-ClientPrefs-GoldKingZ</PackageProjectUrl>
+		<RepositoryUrl>https://github.com/oqyh/cs2-ClientPrefs-GoldKingZ</RepositoryUrl>
+		<PackageTags>cs2;counterstrikesharp;clientprefs;cookies;sql;mysql</PackageTags>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
 	</PropertyGroup>
 
 	<ItemGroup>
-	  <PackageReference Include="CounterStrikeSharp.API" Version="*" />
+		<PackageReference Include="CounterStrikeSharp.API" Version="*" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="\" />
 	</ItemGroup>
 </Project>
