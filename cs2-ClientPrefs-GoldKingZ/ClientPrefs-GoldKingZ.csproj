@@ -1,56 +1,56 @@
 <Project Sdk="Microsoft.NET.Sdk">
-	<PropertyGroup>
-		<TargetFramework>net10.0</TargetFramework>
-		<ImplicitUsings>enable</ImplicitUsings>
-		<Nullable>enable</Nullable>
-		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-		<Configuration>Release</Configuration>
-		<DebugType>none</DebugType>
-		<PluginOutputDir>$(ProjectDir)..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\plugins\ClientPrefs-GoldKingZ\</PluginOutputDir>
-		<NoWarn>$(NoWarn);NU1903</NoWarn>
-	</PropertyGroup>
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <Configuration>Release</Configuration>
+        <DebugType>none</DebugType>
+        <PluginOutputDir>$(ProjectDir)..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\plugins\ClientPrefs-GoldKingZ\</PluginOutputDir>
+        <NoWarn>$(NoWarn);NU1903</NoWarn>
+    </PropertyGroup>
 
-	<ItemGroup>
-		<ProjectReference Include="..\cs2-ClientPrefs-GoldKingZ.Shared\ClientPrefs-GoldKingZ.Shared.csproj" />
-	</ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\cs2-ClientPrefs-GoldKingZ.Shared\ClientPrefs-GoldKingZ.Shared.csproj" />
+    </ItemGroup>
 
-	<ItemGroup>
-		<PackageReference Include="CounterStrikeSharp.API" Version="*" />
-		<PackageReference Include="MySqlConnector" Version="*" />
-		<PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
-		<PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.8" />
-	</ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="CounterStrikeSharp.API" Version="*" />
+        <PackageReference Include="MySqlConnector" Version="*" />
+        <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
+        <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.8" />
+    </ItemGroup>
 
-	<Target Name="CopyPluginFiles" AfterTargets="Build">
-		<MakeDir Directories="$(PluginOutputDir)" />
-		<ItemGroup>
-			<PluginFiles Include="$(ProjectDir)bin\Release\$(TargetName).dll" />
-			<PluginFiles Include="$(ProjectDir)bin\Release\MySqlConnector.dll" />
-			<PluginFiles Include="$(ProjectDir)bin\Release\Microsoft.Data.Sqlite.dll" />
-			<PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.core.dll" />
-			<PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.batteries_v2.dll" />
-			<PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.provider.e_sqlite3.dll" />
-			<PluginFiles Include="$(ProjectDir)..\ClientPrefsGoldKingZ_Build\addons\counterstrikesharp\shared\ClientPrefs-GoldKingZ.Shared\ClientPrefs-GoldKingZ.Shared.dll" />
-		</ItemGroup>
-		<Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
-	</Target>
+    <Target Name="CopyPluginFiles" AfterTargets="Build">
+        <MakeDir Directories="$(PluginOutputDir)" />
+        <ItemGroup>
+            <PluginFiles Include="$(ProjectDir)bin\Release\$(TargetName).dll" />
+            <PluginFiles Include="$(ProjectDir)bin\Release\ClientPrefs-GoldKingZ.Shared.dll" />
+            <PluginFiles Include="$(ProjectDir)bin\Release\MySqlConnector.dll" />
+            <PluginFiles Include="$(ProjectDir)bin\Release\Microsoft.Data.Sqlite.dll" />
+            <PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.core.dll" />
+            <PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.batteries_v2.dll" />
+            <PluginFiles Include="$(ProjectDir)bin\Release\SQLitePCLRaw.provider.e_sqlite3.dll" />
+        </ItemGroup>
+        <Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
+    </Target>
 
-	<Target Name="CopyNativeSqlite" AfterTargets="Build">
-		<ItemGroup>
-			<NativeLinux Include="$(ProjectDir)bin\Release\runtimes\linux-x64\native\libe_sqlite3.so" Condition="Exists('$(ProjectDir)bin\Release\runtimes\linux-x64\native\libe_sqlite3.so')" />
-			<NativeWin Include="$(ProjectDir)bin\Release\runtimes\win-x64\native\e_sqlite3.dll" Condition="Exists('$(ProjectDir)bin\Release\runtimes\win-x64\native\e_sqlite3.dll')" />
-		</ItemGroup>
-		<Copy SourceFiles="@(NativeLinux)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
-		<Copy SourceFiles="@(NativeWin)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
-	</Target>
+    <Target Name="CopyNativeSqlite" AfterTargets="Build">
+        <ItemGroup>
+            <NativeLinux Include="$(ProjectDir)bin\Release\runtimes\linux-x64\native\libe_sqlite3.so" Condition="Exists('$(ProjectDir)bin\Release\runtimes\linux-x64\native\libe_sqlite3.so')" />
+            <NativeWin Include="$(ProjectDir)bin\Release\runtimes\win-x64\native\e_sqlite3.dll" Condition="Exists('$(ProjectDir)bin\Release\runtimes\win-x64\native\e_sqlite3.dll')" />
+        </ItemGroup>
+        <Copy SourceFiles="@(NativeLinux)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
+        <Copy SourceFiles="@(NativeWin)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="false" />
+    </Target>
 
-	<Target Name="CopyLangFolder" AfterTargets="Build">
-		<ItemGroup>
-			<LangFiles Include="$(ProjectDir)lang\**\*.*" />
-		</ItemGroup>
-		<Copy SourceFiles="@(LangFiles)" DestinationFiles="@(LangFiles->'$(PluginOutputDir)lang\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="false" />
-	</Target>
+    <Target Name="CopyLangFolder" AfterTargets="Build">
+        <ItemGroup>
+            <LangFiles Include="$(ProjectDir)lang\**\*.*" />
+        </ItemGroup>
+        <Copy SourceFiles="@(LangFiles)" DestinationFiles="@(LangFiles->'$(PluginOutputDir)lang\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="false" />
+    </Target>
 </Project>

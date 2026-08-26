@@ -7,7 +7,7 @@ namespace ClientPrefs_GoldKingZ;
 public sealed class MainPlugin : BasePlugin
 {
     public override string ModuleName => "Shared player Preferences API Per-Plugin Isolation With [Cookies(SQLite) + MySQL]";
-    public override string ModuleVersion => "1.0.3";
+    public override string ModuleVersion => "1.0.4";
     public override string ModuleAuthor => "Gold KingZ";
     public override string ModuleDescription => "https://github.com/oqyh";
 	public static MainPlugin Instance { get; set; } = new();
@@ -54,12 +54,20 @@ public sealed class MainPlugin : BasePlugin
         if (@event == null) return HookResult.Continue;
 
         var player = @event.Userid;
-        if (player == null || !player.IsValid || player.IsBot || player.IsHLTV) return HookResult.Continue;
-
-        int slot = player.Slot;
-        LoadNotifier.ClearSlot(slot);
-        foreach (var store in _api.All)
-            _ = store.OnPlayerDisconnectAsync(slot);
+        if (player != null && player.IsValid)
+        {
+            int slot = player.Slot;
+            if (!player.IsBot && !player.IsHLTV)
+            {
+                LoadNotifier.ClearSlot(slot);
+                foreach (var store in _api.All)
+                    _ = store.OnPlayerDisconnectAsync(slot);
+            }
+            else
+            {
+                LoadNotifier.ClearSlot(slot);
+            }
+        }
 
         return HookResult.Continue;
     }
@@ -85,8 +93,7 @@ public sealed class MainPlugin : BasePlugin
 
     internal static void DebugCore(string message)
     {
-        Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine($"[ClientPrefs]: {message}");
-        Console.ResetColor();
+        const string prefix = "[ClientPrefs]";
+        Con.WriteLine($"{Con.Inverse}{Con.DeepPink}{prefix}{Con.Reset} {Con.DeepPink}{message}");
     }
 }
