@@ -41,7 +41,9 @@ Shared player Preferences API Per-Plugin Isolation With [Cookies(SQLite) + MySQL
 2. Extract contents to your `csgo` directory
 3. Restart your server
 
-### For Developers
+---
+
+## 💻 For Developers
  
 **Option A — NuGet (recommended):**
  
